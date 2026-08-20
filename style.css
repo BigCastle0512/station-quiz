@@ -83,6 +83,7 @@ main {
 #quiz-panel {
   flex: 1 1 40%;
   max-width: 420px;
+  min-width: 0;
   background: var(--panel-bg);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -139,4 +140,24 @@ main {
   border-radius: 50%;
   width: 14px;
   height: 14px;
+}
+
+@media (max-width: 720px) {
+  header { flex-wrap: wrap; gap: 8px; padding: 10px 14px; }
+  header h1 { font-size: 1rem; }
+  #mode-bar, #filter-bar { padding: 8px 14px; }
+  #filter-bar { flex-direction: column; align-items: flex-start; gap: 6px; }
+  main {
+    flex-direction: column;
+    height: auto;
+    padding: 0 14px 14px;
+  }
+  #map {
+    height: 50vh;
+    min-height: 280px;
+  }
+  #quiz-panel {
+    max-width: none;
+    max-height: none;
+  }
 }
