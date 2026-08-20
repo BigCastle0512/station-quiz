@@ -580,8 +580,15 @@ function startNameToPin() {
       fillOpacity: 0.07,
       interactive: false,
     }).addTo(markerLayer);
-    L.circleMarker([e.latlng.lat, e.latlng.lng], { radius: 7, color: "#999" }).addTo(markerLayer);
-    L.circleMarker([st.lat, st.lon], { radius: 9, className: "station-marker" }).addTo(markerLayer);
+    L.circleMarker([e.latlng.lat, e.latlng.lng], { radius: 7, color: "#999", fillColor: "#999", fillOpacity: 0.8, weight: 2 })
+      .bindTooltip("クリックした位置", { permanent: true, direction: "bottom", className: "reveal-label" })
+      .addTo(markerLayer);
+    L.circleMarker([st.lat, st.lon], { radius: 9, className: "station-marker" })
+      .bindTooltip(`${st.name}駅(正解)`, { permanent: true, direction: "top", className: "reveal-label correct" })
+      .addTo(markerLayer);
+
+    // クリックした位置と正解の駅が両方とも画面内に収まるようにする
+    map.fitBounds([[e.latlng.lat, e.latlng.lng], [st.lat, st.lon]], { padding: [60, 60], maxZoom: 16 });
 
     recordResult(st, correct);
     showFeedback(
