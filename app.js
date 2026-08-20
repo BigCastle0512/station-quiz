@@ -10,6 +10,7 @@ let mode = "pin-to-name";
 let current = null; // 現在の問題に関する状態
 let map, markerLayer, lineLayer, wardLayer, stationDotsLayer;
 let linePolylines = {}; // 路線名 -> Leaflet Polyline[]
+let lineCasings = {}; // 路線名 -> Leaflet Polyline[](縁取り)
 let lineLabels = {}; // 路線名 -> Leaflet Marker(常時ラベル表示用)
 let stationDots = {}; // 駅id -> Leaflet CircleMarker
 const LINE_LABEL_MIN_ZOOM = 13; // これより引いた(数字が小さい)ズームではラベルを隠して文字の重なりを防ぐ
@@ -91,6 +92,31 @@ function findWardAt(lat, lon) {
   return null;
 }
 
+// 画面内をグリッド探索し、区の内側にある点の中から中心に最も近いものを返す
+// (境界点の重心だと区の外に出てしまうことがあるための対策)
+function findInsidePointNearCenter(rings, bounds, center) {
+  const GRID = 10;
+  const south = bounds.getSouth();
+  const north = bounds.getNorth();
+  const west = bounds.getWest();
+  const east = bounds.getEast();
+  let best = null;
+  let bestDist = Infinity;
+  for (let i = 0; i <= GRID; i++) {
+    const lat = south + ((north - south) * i) / GRID;
+    for (let j = 0; j <= GRID; j++) {
+      const lon = west + ((east - west) * j) / GRID;
+      if (!rings.some((ring) => pointInRing(lat, lon, ring))) continue;
+      const d = center.distanceTo([lat, lon]);
+      if (d < bestDist) {
+        bestDist = d;
+        best = [lat, lon];
+      }
+    }
+  }
+  return best;
+}
+
 let wardLabels = {}; // 区名 -> Leaflet Marker(常時ラベル表示用)
 const WARD_LABEL_MIN_ZOOM = 10;
 
@@ -103,27 +129,38 @@ function updateWardLabelPositions() {
   const bounds = map.getBounds();
   const center = map.getCenter();
   const MIN_LABEL_SPACING_PX = 90;
+  const MIN_VISIBLE_EXTENT_PX = 70; // 画面内に見えている範囲がこれより小さい区は表示しない
   const candidates = [];
 
   for (const [name, rings] of Object.entries(wardData)) {
-    // 画面中心がその区の内側にあれば中心付近に、そうでなければ画面内に見えている境界上の点に表示する
-    let point = null;
-    if (rings.some((ring) => pointInRing(center.lat, center.lng, ring))) {
-      point = [center.lat, center.lng];
-    } else {
-      let bestDist = Infinity;
-      for (const ring of rings) {
-        for (const pt of ring) {
-          if (!bounds.contains(pt)) continue;
-          const d = center.distanceTo(pt);
-          if (d < bestDist) {
-            bestDist = d;
-            point = pt;
-          }
-        }
+    const centerInside = rings.some((ring) => pointInRing(center.lat, center.lng, ring));
+
+    if (centerInside) {
+      // 画面中心がその区の内側にあれば、境界に寄らず中心付近に表示する
+      candidates.push({ name, point: [center.lat, center.lng] });
+      continue;
+    }
+
+    // 画面内に入っている境界点を集め、見えている範囲の大きさを判定する
+    const inViewPoints = [];
+    for (const ring of rings) {
+      for (const pt of ring) {
+        if (bounds.contains(pt)) inViewPoints.push(pt);
       }
     }
-    if (point) candidates.push({ name, point });
+    if (inViewPoints.length === 0) continue;
+
+    const screenPts = inViewPoints.map((pt) => map.latLngToContainerPoint(pt));
+    const xs = screenPts.map((p) => p.x);
+    const ys = screenPts.map((p) => p.y);
+    const extent = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+    if (extent < MIN_VISIBLE_EXTENT_PX) continue; // 見えている範囲が小さすぎる区は表示しない
+
+    // 境界点の重心は区の外に出ることがあるため、画面内をグリッド探索して
+    // 実際に区の内側にある点の中から画面中心に最も近いものを選ぶ
+    const point = findInsidePointNearCenter(rings, bounds, center);
+    if (!point) continue;
+    candidates.push({ name, point });
   }
 
   const placedScreenPoints = [];
@@ -146,16 +183,18 @@ function updateWardLabelPositions() {
 function renderLines() {
   for (const [name, entry] of Object.entries(lineData)) {
     const popupHtml = `<b>${name}</b><br>${entry.operator || ""}`;
+    const casings = [];
     const polylines = entry.segments.map((seg) => {
-      // 縁取り: 黄色など淡い色の路線が薄い背景地図に埋もれて見えなくなるのを防ぐ
-      L.polyline(seg, { color: "#222", weight: 5, opacity: 0.25, interactive: false }).addTo(lineLayer);
+      // 縁取り: 黄色など淡い色の路線が薄い背景地図に埋もれて見えなくなるのを防ぐ(太すぎないよう最小限に)
+      casings.push(L.polyline(seg, { color: "#222", weight: 3.5, opacity: 0.2, interactive: false }).addTo(lineLayer));
       // タップ判定用に太い透明な線を下に重ね、見た目の細い線はそのまま保つ(スマホでの誤タップ対策)
       L.polyline(seg, { color: "#000", weight: 16, opacity: 0, interactive: true })
         .bindPopup(popupHtml)
         .addTo(lineLayer);
-      return L.polyline(seg, { color: entry.color, weight: 3, opacity: 0.85 }).bindPopup(popupHtml).addTo(lineLayer);
+      return L.polyline(seg, { color: entry.color, weight: 2, opacity: 0.85 }).bindPopup(popupHtml).addTo(lineLayer);
     });
     linePolylines[name] = polylines;
+    lineCasings[name] = casings;
   }
 }
 
@@ -244,11 +283,17 @@ function updateMapHighlight() {
   for (const [name, polylines] of Object.entries(linePolylines)) {
     const matches = (!line || name === line) && (!operator || lineData[name].operator === operator);
     const style = !lineActive
-      ? { opacity: 0.65, weight: 3 }
+      ? { opacity: 0.85, weight: 2 }
       : matches
-      ? { opacity: 0.95, weight: 5 }
-      : { opacity: 0.1, weight: 2 };
+      ? { opacity: 1, weight: 3.5 }
+      : { opacity: 0, weight: 2 };
+    const casingStyle = !lineActive
+      ? { opacity: 0.2, weight: 3.5 }
+      : matches
+      ? { opacity: 0.3, weight: 5 }
+      : { opacity: 0, weight: 3.5 };
     polylines.forEach((pl) => pl.setStyle(style));
+    (lineCasings[name] || []).forEach((pl) => pl.setStyle(casingStyle));
   }
 
   const dotActive = Boolean(line || operator || ward);
