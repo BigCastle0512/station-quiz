@@ -149,6 +149,20 @@ main {
   border: none !important;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25) !important;
 }
+
+.line-label {
+  background: rgba(255, 255, 255, 0.82);
+  color: #333;
+  font-size: 0.62rem;
+  font-weight: 600;
+  padding: 0 4px;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 3px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.line-label::before { display: none; }
 .reveal-label.correct { color: var(--correct); }
 .reveal-label.wrong { color: var(--wrong); }
 .reveal-label::before { display: none; }

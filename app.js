@@ -10,7 +10,9 @@ let mode = "pin-to-name";
 let current = null; // 現在の問題に関する状態
 let map, markerLayer, lineLayer, wardLayer, stationDotsLayer;
 let linePolylines = {}; // 路線名 -> Leaflet Polyline[]
+let lineLabels = {}; // 路線名 -> Leaflet Marker(常時ラベル表示用)
 let stationDots = {}; // 駅id -> Leaflet CircleMarker
+const LINE_LABEL_MIN_ZOOM = 13; // これより引いた(数字が小さい)ズームではラベルを隠して文字の重なりを防ぐ
 
 async function init() {
   const [stRes, lineRes] = await Promise.all([fetch("data/stations.json"), fetch("data/lines.json")]);
@@ -48,6 +50,7 @@ function setupMap() {
   lineLayer = L.layerGroup().addTo(map);
   stationDotsLayer = L.layerGroup().addTo(map);
   markerLayer = L.layerGroup().addTo(map);
+  map.on("zoomend", updateLineLabelVisibility);
 }
 
 function renderWardBoundaries() {
@@ -74,6 +77,32 @@ function renderLines() {
       return L.polyline(seg, { color: entry.color, weight: 3, opacity: 0.65 }).bindPopup(popupHtml).addTo(lineLayer);
     });
     linePolylines[name] = polylines;
+
+    const longest = entry.segments.reduce((a, b) => (b.length > a.length ? b : a), entry.segments[0]);
+    const midpoint = longest[Math.floor(longest.length / 2)];
+    const label = L.marker(midpoint, {
+      icon: L.divIcon({ className: "line-label-anchor", iconSize: [0, 0] }),
+      interactive: false,
+      keyboard: false,
+    })
+      .bindTooltip(name, { permanent: true, direction: "center", className: "line-label" })
+      .addTo(lineLayer);
+    lineLabels[name] = label;
+  }
+}
+
+function updateLineLabelVisibility() {
+  const line = document.getElementById("line-filter").value;
+  const operator = document.getElementById("operator-filter").value;
+  const filterActive = Boolean(line || operator);
+  const zoomOk = map.getZoom() >= LINE_LABEL_MIN_ZOOM;
+
+  for (const [name, label] of Object.entries(lineLabels)) {
+    const matches = (!line || name === line) && (!operator || lineData[name].operator === operator);
+    const visible = zoomOk && (!filterActive || matches);
+    const tooltip = label.getTooltip();
+    const el = tooltip && tooltip.getElement();
+    if (el) el.style.display = visible ? "" : "none";
   }
 }
 
@@ -117,6 +146,8 @@ function updateMapHighlight() {
       (!ward || st.ward === ward);
     dot.setStyle(!dotActive ? { opacity: 0.8, fillOpacity: 1, radius: 3 } : matches ? { opacity: 1, fillOpacity: 1, radius: 4 } : { opacity: 0.15, fillOpacity: 0.15, radius: 3 });
   }
+
+  updateLineLabelVisibility();
 }
 
 function setupFilters() {
@@ -388,7 +419,11 @@ function handleChoiceAnswer(btn, choice, correctStation) {
   const correct = choice === correctStation;
   markChoiceButtons(correct, choice.name, correctStation.name);
   recordResult(correctStation, correct);
-  showFeedback(correct, correct ? "正解！" : `不正解。正解は「${correctStation.name}」`);
+  const lineInfo = correctStation.lines.length ? `(${correctStation.lines.join("・")})` : "";
+  const message = correct
+    ? `正解！「${correctStation.name}」${lineInfo}`
+    : `不正解。正解は「${correctStation.name}」${lineInfo}`;
+  showFeedback(correct, message);
   revealChoiceLocations(correctStation, choice);
 }
 
