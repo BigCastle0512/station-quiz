@@ -376,10 +376,14 @@ def build_line_geometry(route_elements: list[dict]) -> dict:
     ways_by_id = {e["id"]: e for e in route_elements if e["type"] == "way"}
     relations = [e for e in route_elements if e["type"] == "relation"]
 
+    # プラットフォームなど線路そのものではない役割のみ除外する。複線区間などで
+    # 使われる "north"/"south" のような方向別ロールも実際の線路なので含める。
+    NON_TRACK_WAY_ROLES = {"platform", "platform_entry_only", "platform_exit_only", "stop_area"}
+
     def way_segments(rel) -> list[list[list[float]]]:
         segments = []
         for member in rel.get("members", []):
-            if member["type"] != "way" or member.get("role") not in ("", None):
+            if member["type"] != "way" or member.get("role") in NON_TRACK_WAY_ROLES:
                 continue
             way = ways_by_id.get(member["ref"])
             if not way:

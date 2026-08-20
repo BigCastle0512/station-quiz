@@ -315,6 +315,10 @@ function updateLineLabelPositions() {
 
 function renderStationDots() {
   for (const st of stations) {
+    // タップ判定用に大きめの透明な円を重ね、見た目の小さい点はそのまま保つ(スマホでの誤タップ対策)
+    L.circleMarker([st.lat, st.lon], { radius: 14, opacity: 0, fillOpacity: 0 })
+      .bindPopup(`<b>${st.name}駅</b><br>${st.ward || ""}`)
+      .addTo(stationDotsLayer);
     const dot = L.circleMarker([st.lat, st.lon], {
       radius: 3,
       color: "#333",
@@ -322,7 +326,8 @@ function renderStationDots() {
       fillColor: "#fff",
       fillOpacity: 1,
       opacity: 0.8,
-    }).bindPopup(`<b>${st.name}駅</b><br>${st.ward || ""}`).addTo(stationDotsLayer);
+      interactive: false,
+    }).addTo(stationDotsLayer);
     stationDots[st.id] = dot;
   }
 }
