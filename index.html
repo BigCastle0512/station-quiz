@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>23区駅名クイズ</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>東京23区 駅名クイズ</h1>
+  <div id="score-bar">
+    <span id="score-text">0 / 0</span>
+    <button id="reset-score-btn" title="スコアをリセット">リセット</button>
+  </div>
+</header>
+
+<div id="mode-bar">
+  <button class="mode-btn active" data-mode="pin-to-name">地図→駅名</button>
+  <button class="mode-btn" data-mode="name-to-pin">駅名→地図</button>
+  <button class="mode-btn" data-mode="knowledge">知識クイズ</button>
+</div>
+
+<div id="filter-bar">
+  <label>会社で絞る:
+    <select id="operator-filter"><option value="">すべて</option></select>
+  </label>
+  <label>路線で絞る:
+    <select id="line-filter"><option value="">すべて</option></select>
+  </label>
+  <label>区で絞る:
+    <select id="ward-filter"><option value="">すべて</option></select>
+  </label>
+  <label><input type="checkbox" id="weak-only-checkbox"> 苦手な駅のみ</label>
+</div>
+
+<main>
+  <div id="map"></div>
+  <div id="quiz-panel">
+    <div id="question-area"></div>
+    <div id="answer-area"></div>
+    <div id="feedback-area"></div>
+    <button id="next-btn" style="display:none;">次の問題へ</button>
+  </div>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
