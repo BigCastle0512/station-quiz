@@ -584,7 +584,11 @@ function startNameToPin() {
       .bindTooltip("クリックした位置", { permanent: true, direction: "bottom", className: "reveal-label" })
       .addTo(markerLayer);
     L.circleMarker([st.lat, st.lon], { radius: 9, className: "station-marker" })
-      .bindTooltip(`${st.name}駅(正解)`, { permanent: true, direction: "top", className: "reveal-label correct" })
+      .bindTooltip(`<b>${st.name}駅(正解)</b>${choiceLabelHtml(st).replace(/^<b>.*?<\/b>/, "")}`, {
+        permanent: true,
+        direction: "top",
+        className: "reveal-label correct",
+      })
       .addTo(markerLayer);
 
     // クリックした位置と正解の駅が両方とも画面内に収まるようにする
