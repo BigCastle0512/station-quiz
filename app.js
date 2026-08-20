@@ -85,7 +85,11 @@ function renderLines() {
       interactive: false,
       keyboard: false,
     })
-      .bindTooltip(name, { permanent: true, direction: "center", className: "line-label" })
+      .bindTooltip(`<span class="line-label-swatch" style="background:${entry.color}"></span>${name}`, {
+        permanent: true,
+        direction: "center",
+        className: "line-label",
+      })
       .addTo(lineLayer);
     lineLabels[name] = label;
   }
@@ -284,13 +288,21 @@ function startPinToName() {
   });
 }
 
+function choiceLabelHtml(choice) {
+  const lines = choice.lines
+    .map((l) => `<span class="reveal-line-chip"><span class="line-label-swatch" style="background:${lineData[l]?.color || "#999"}"></span>${l}</span>`)
+    .join("");
+  return `<b>${choice.name}</b>${lines ? `<div class="reveal-lines">${lines}</div>` : ""}`;
+}
+
 function revealChoiceLocations(correctStation, chosenStation) {
   const bounds = [];
   for (const choice of current.choices) {
     bounds.push([choice.lat, choice.lon]);
+    const html = choiceLabelHtml(choice);
     if (choice === correctStation) {
       L.circleMarker([choice.lat, choice.lon], { radius: 9, className: "station-marker" })
-        .bindTooltip(choice.name, { permanent: true, direction: "top", className: "reveal-label correct" })
+        .bindTooltip(html, { permanent: true, direction: "top", className: "reveal-label correct" })
         .addTo(markerLayer);
       continue;
     }
@@ -302,10 +314,10 @@ function revealChoiceLocations(correctStation, chosenStation) {
       fillOpacity: 0.8,
       weight: 2,
     })
-      .bindTooltip(choice.name, { permanent: true, direction: "top", className: isWrongPick ? "reveal-label wrong" : "reveal-label" })
+      .bindTooltip(html, { permanent: true, direction: "top", className: isWrongPick ? "reveal-label wrong" : "reveal-label" })
       .addTo(markerLayer);
   }
-  map.fitBounds(bounds, { padding: [40, 40], maxZoom: 15 });
+  map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
 }
 
 function startNameToPin() {
