@@ -8,6 +8,7 @@ let filteredStations = [];
 let progress = loadProgress();
 let mode = "pin-to-name";
 let current = null; // 現在の問題に関する状態
+let lineQuizActive = false; // 路線クイズの専用表示中は通常の路線描画更新を止める
 let activeMapClickHandler = null; // 「駅名→地図」で登録中のクリックハンドラ(前の問題の未回答分を確実に解除するため)
 let map, markerLayer, lineLayer, wardLayer, stationDotsLayer;
 let linePolylines = {}; // 路線名 -> Leaflet Polyline[]
@@ -252,6 +253,7 @@ function renderLines() {
 }
 
 function updateLineLabelPositions() {
+  if (lineQuizActive) return;
   const line = document.getElementById("line-filter").value;
   const operator = document.getElementById("operator-filter").value;
   const filterActive = Boolean(line || operator);
@@ -334,6 +336,7 @@ function renderStationDots() {
 }
 
 function updateMapHighlight() {
+  if (lineQuizActive) return;
   const line = document.getElementById("line-filter").value;
   const operator = document.getElementById("operator-filter").value;
   const ward = document.getElementById("ward-filter").value;
@@ -498,6 +501,13 @@ function nextQuestion() {
     map.off("click", activeMapClickHandler);
     activeMapClickHandler = null;
   }
+  lineQuizActive = false; // 路線クイズの表示ロックを解除してから通常表示に戻す
+  refreshMapOverlays(); // 路線クイズなどで変えた路線の色・表示を通常状態に戻す
+
+  if (mode === "line-quiz") {
+    startLineQuiz();
+    return;
+  }
 
   if (filteredStations.length === 0) {
     document.getElementById("question-area").textContent = "この条件に一致する駅がありません。フィルタを変更してください。";
@@ -622,6 +632,77 @@ function startNameToPin() {
   };
   activeMapClickHandler = clickHandler;
   map.on("click", clickHandler);
+}
+
+function lineQuizCandidates() {
+  const operator = document.getElementById("operator-filter").value;
+  return Object.entries(lineData).filter(([, entry]) => !operator || entry.operator === operator);
+}
+
+function startLineQuiz() {
+  const candidates = lineQuizCandidates();
+  if (candidates.length < 4) {
+    document.getElementById("question-area").textContent = "この条件では路線クイズを出題できません。会社フィルタを変更してください。";
+    document.getElementById("answer-area").innerHTML = "";
+    return;
+  }
+  const [lineName, entry] = candidates[Math.floor(Math.random() * candidates.length)];
+  current = { type: "line-quiz", lineName };
+
+  // 出題対象の路線だけ地味な色で表示し、他の路線・路線名ラベルは隠す
+  for (const label of Object.values(lineLabels)) map.removeLayer(label);
+  lineLabels = {};
+  for (const [name, polylines] of Object.entries(linePolylines)) {
+    const isTarget = name === lineName;
+    polylines.forEach((pl) => pl.setStyle({ color: isTarget ? "#444" : "#000", opacity: isTarget ? 0.9 : 0, weight: isTarget ? 3.5 : 2 }));
+    (lineCasings[name] || []).forEach((pl) => pl.setStyle({ opacity: 0 }));
+  }
+
+  lineQuizActive = true; // fitBounds が発火する moveend で通常表示に戻されないようにする
+  const bounds = entry.segments.flat();
+  if (bounds.length) map.fitBounds(bounds, { padding: [40, 40], maxZoom: 15 });
+
+  document.getElementById("question-area").innerHTML = "これは何線？";
+  const answerArea = document.getElementById("answer-area");
+  answerArea.innerHTML = "";
+
+  const distractorPool = candidates.map(([name]) => name).filter((name) => name !== lineName);
+  const choices = shuffle([lineName, ...shuffle(distractorPool).slice(0, 3)]);
+  choices.forEach((name) => {
+    const btn = document.createElement("button");
+    btn.className = "choice";
+    btn.textContent = name;
+    btn.addEventListener("click", () => handleLineQuizAnswer(btn, name, lineName));
+    answerArea.appendChild(btn);
+  });
+}
+
+function handleLineQuizAnswer(btn, chosenName, correctName) {
+  if (current.answered) return;
+  current.answered = true;
+  const correct = chosenName === correctName;
+  markChoiceButtons(correct, chosenName, correctName);
+
+  // 正解の色を表示して答え合わせする(白など淡い色でも見えるよう縁取りを濃くする)
+  const entry = lineData[correctName];
+  (linePolylines[correctName] || []).forEach((pl) => pl.setStyle({ color: entry.color, opacity: 0.95, weight: 3.5 }));
+  (lineCasings[correctName] || []).forEach((pl) => pl.setStyle({ opacity: 0.5, weight: 5.5 }));
+
+  const longest = entry.segments.reduce((a, b) => (b.length > a.length ? b : a), entry.segments[0]);
+  L.marker(longest[Math.floor(longest.length / 2)], {
+    icon: L.divIcon({ className: "line-label-anchor", iconSize: [0, 0] }),
+    interactive: false,
+    keyboard: false,
+  })
+    .bindTooltip(`<span class="line-label-swatch" style="background:${entry.color}"></span>${correctName}`, {
+      permanent: true,
+      direction: "center",
+      className: "line-label",
+    })
+    .addTo(markerLayer);
+
+  recordResult({ id: `line:${correctName}` }, correct);
+  showFeedback(correct, correct ? `正解！「${correctName}」` : `不正解。正解は「${correctName}」`);
 }
 
 function startKnowledge() {
