@@ -13,8 +13,17 @@ let linePolylines = {}; // 路線名 -> Leaflet Polyline[]
 let lineCasings = {}; // 路線名 -> Leaflet Polyline[](縁取り)
 let lineLabels = {}; // 路線名 -> Leaflet Marker(常時ラベル表示用)
 let stationDots = {}; // 駅id -> Leaflet CircleMarker
+let wardLabelScreenPoints = []; // 区名ラベルの画面座標(路線名ラベルが避けるために参照する)
+const WARD_LABEL_AVOID_PX = 85; // 路線名ラベルが区名ラベルから離す最小距離
 const LINE_LABEL_MIN_ZOOM = 13; // これより引いた(数字が小さい)ズームではラベルを隠して文字の重なりを防ぐ
 const STATION_DOT_MIN_ZOOM = 13; // これより引いたズームでは駅の点を隠し、広域では路線の形状を見やすくする
+
+let _measureCanvasCtx = null;
+function measureTextWidth(text, font) {
+  if (!_measureCanvasCtx) _measureCanvasCtx = document.createElement("canvas").getContext("2d");
+  _measureCanvasCtx.font = font;
+  return _measureCanvasCtx.measureText(text).width;
+}
 
 async function init() {
   const [stRes, lineRes] = await Promise.all([fetch("data/stations.json"), fetch("data/lines.json")]);
@@ -37,8 +46,7 @@ async function init() {
   document.getElementById("reset-score-btn").addEventListener("click", resetScore);
 
   applyFilters();
-  updateMapHighlight();
-  updateWardLabelPositions();
+  refreshMapOverlays();
   updateScoreText();
   nextQuestion();
 }
@@ -53,10 +61,7 @@ function setupMap() {
   wardLayer = L.layerGroup().addTo(map);
   stationDotsLayer = L.layerGroup().addTo(map);
   markerLayer = L.layerGroup().addTo(map);
-  map.on("moveend", () => {
-    updateMapHighlight();
-    updateWardLabelPositions();
-  });
+  map.on("moveend", refreshMapOverlays);
 }
 
 function renderWardBoundaries() {
@@ -92,29 +97,64 @@ function findWardAt(lat, lon) {
   return null;
 }
 
-// 画面内をグリッド探索し、区の内側にある点の中から中心に最も近いものを返す
-// (境界点の重心だと区の外に出てしまうことがあるための対策)
-function findInsidePointNearCenter(rings, bounds, center) {
-  const GRID = 10;
+// 画面内をグリッド探索し、区の内側にありつつ境界や路線からできるだけ離れた点を返す。
+// 最終候補でも画面上の境界からの余白(ラベルの実際の文字幅から算出)が足りなければ null を返し、無理に表示しない。
+function findMostInteriorPoint(rings, bounds, center, requiredClearancePx, linePointSample) {
+  const GRID = 14;
   const south = bounds.getSouth();
   const north = bounds.getNorth();
   const west = bounds.getWest();
   const east = bounds.getEast();
+
+  // 距離判定用に境界点を間引いてサンプリング(全点を使うと重いため)
+  const boundarySample = [];
+  for (const ring of rings) {
+    const step = Math.max(1, Math.floor(ring.length / 60));
+    for (let i = 0; i < ring.length; i += step) boundarySample.push(ring[i]);
+  }
+  if (boundarySample.length === 0) return null;
+
   let best = null;
-  let bestDist = Infinity;
+  let bestScore = -Infinity;
   for (let i = 0; i <= GRID; i++) {
     const lat = south + ((north - south) * i) / GRID;
     for (let j = 0; j <= GRID; j++) {
       const lon = west + ((east - west) * j) / GRID;
       if (!rings.some((ring) => pointInRing(lat, lon, ring))) continue;
-      const d = center.distanceTo([lat, lon]);
-      if (d < bestDist) {
-        bestDist = d;
+
+      let minDistSq = Infinity;
+      for (const bp of boundarySample) {
+        const dLat = lat - bp[0];
+        const dLon = lon - bp[1];
+        const distSq = dLat * dLat + dLon * dLon;
+        if (distSq < minDistSq) minDistSq = distSq;
+      }
+      let minLineDistSq = Infinity;
+      for (const lp of linePointSample) {
+        const dLat = lat - lp[0];
+        const dLon = lon - lp[1];
+        const distSq = dLat * dLat + dLon * dLon;
+        if (distSq < minLineDistSq) minLineDistSq = distSq;
+      }
+      const centerPenalty = ((lat - center.lat) ** 2 + (lon - center.lng) ** 2) * 0.05;
+      // 境界からの距離を最優先しつつ、路線からもできるだけ離れた点を選ぶ(路線側は補助的な重み)
+      const score = minDistSq + Math.min(minLineDistSq, minDistSq) * 0.5 - centerPenalty;
+      if (score > bestScore) {
+        bestScore = score;
         best = [lat, lon];
       }
     }
   }
-  return best;
+  if (!best) return null;
+
+  // 選んだ点が画面上で本当に境界から十分離れているか、ラベルの実際の幅を踏まえて最終確認する
+  const bestScreen = map.latLngToContainerPoint(best);
+  let minPixelDist = Infinity;
+  for (const bp of boundarySample) {
+    const d = bestScreen.distanceTo(map.latLngToContainerPoint(bp));
+    if (d < minPixelDist) minPixelDist = d;
+  }
+  return minPixelDist >= requiredClearancePx ? best : null;
 }
 
 let wardLabels = {}; // 区名 -> Leaflet Marker(常時ラベル表示用)
@@ -130,35 +170,51 @@ function updateWardLabelPositions() {
   const center = map.getCenter();
   const MIN_LABEL_SPACING_PX = 90;
   const MIN_VISIBLE_EXTENT_PX = 70; // 画面内に見えている範囲がこれより小さい区は表示しない
+  const size = map.getSize();
+  const edgeMargin = Math.min(70, size.x / 4, size.y / 4); // ラベルが画面端で見切れないよう、探索範囲を画面より一回り内側に絞る
+  const insetBounds = L.latLngBounds(
+    map.containerPointToLatLng([edgeMargin, size.y - edgeMargin]),
+    map.containerPointToLatLng([size.x - edgeMargin, edgeMargin])
+  );
+  const WARD_LABEL_FONT = "700 1.5rem sans-serif";
+
+  // 路線ともなるべく重ならないよう、画面内に見えている路線の座標を間引いてサンプリングしておく
+  const linePointSample = [];
+  for (const entry of Object.values(lineData)) {
+    for (const seg of entry.segments) {
+      const step = Math.max(1, Math.floor(seg.length / 20));
+      for (let i = 0; i < seg.length; i += step) {
+        if (bounds.contains(seg[i])) linePointSample.push(seg[i]);
+      }
+    }
+  }
+
   const candidates = [];
 
   for (const [name, rings] of Object.entries(wardData)) {
     const centerInside = rings.some((ring) => pointInRing(center.lat, center.lng, ring));
 
-    if (centerInside) {
-      // 画面中心がその区の内側にあれば、境界に寄らず中心付近に表示する
-      candidates.push({ name, point: [center.lat, center.lng] });
-      continue;
-    }
-
-    // 画面内に入っている境界点を集め、見えている範囲の大きさを判定する
+    // 画面内に入っている境界点を集め、見えている範囲の大きさを判定する(高コストな探索を省くための事前フィルタ)
     const inViewPoints = [];
     for (const ring of rings) {
       for (const pt of ring) {
         if (bounds.contains(pt)) inViewPoints.push(pt);
       }
     }
-    if (inViewPoints.length === 0) continue;
+    if (!centerInside && inViewPoints.length === 0) continue;
 
-    const screenPts = inViewPoints.map((pt) => map.latLngToContainerPoint(pt));
-    const xs = screenPts.map((p) => p.x);
-    const ys = screenPts.map((p) => p.y);
-    const extent = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
-    if (extent < MIN_VISIBLE_EXTENT_PX) continue; // 見えている範囲が小さすぎる区は表示しない
+    if (inViewPoints.length > 0) {
+      const screenPts = inViewPoints.map((pt) => map.latLngToContainerPoint(pt));
+      const xs = screenPts.map((p) => p.x);
+      const ys = screenPts.map((p) => p.y);
+      const extent = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+      if (!centerInside && extent < MIN_VISIBLE_EXTENT_PX) continue; // 見えている範囲が小さすぎる区は表示しない
+    }
 
-    // 境界点の重心は区の外に出ることがあるため、画面内をグリッド探索して
-    // 実際に区の内側にある点の中から画面中心に最も近いものを選ぶ
-    const point = findInsidePointNearCenter(rings, bounds, center);
+    // 境界・路線からできるだけ離れた区の内側の点を探す。実際の文字幅の半分+余白を
+    // 必要な余白として使い、画面上でそれを満たせない場合は null を返して無理に表示しない。
+    const requiredClearancePx = measureTextWidth(name, WARD_LABEL_FONT) / 2 + 14;
+    const point = findMostInteriorPoint(rings, insetBounds, center, requiredClearancePx, linePointSample);
     if (!point) continue;
     candidates.push({ name, point });
   }
@@ -178,6 +234,7 @@ function updateWardLabelPositions() {
       .addTo(wardLayer);
     wardLabels[name] = label;
   }
+  wardLabelScreenPoints = placedScreenPoints;
 }
 
 function renderLines() {
@@ -235,14 +292,15 @@ function updateLineLabelPositions() {
     if (best) candidates.push({ name, entry, point: best, dist: bestDist });
   }
 
-  // 画面中心に近い(=より目立つ)路線を優先して配置し、既存ラベルと近すぎる候補はスキップする
+  // 画面中心に近い(=より目立つ)路線を優先して配置し、既存ラベルや区名ラベルと近すぎる候補はスキップする
   candidates.sort((a, b) => a.dist - b.dist);
   const placedScreenPoints = [];
 
   for (const { name, entry, point } of candidates) {
     const screenPt = map.latLngToContainerPoint(point);
-    const tooClose = placedScreenPoints.some((p) => screenPt.distanceTo(p) < MIN_LABEL_SPACING_PX);
-    if (tooClose) continue;
+    const tooCloseToLine = placedScreenPoints.some((p) => screenPt.distanceTo(p) < MIN_LABEL_SPACING_PX);
+    const tooCloseToWard = wardLabelScreenPoints.some((p) => screenPt.distanceTo(p) < WARD_LABEL_AVOID_PX);
+    if (tooCloseToLine || tooCloseToWard) continue;
     placedScreenPoints.push(screenPt);
 
     const label = L.marker(point, {
@@ -311,7 +369,12 @@ function updateMapHighlight() {
       (!ward || st.ward === ward);
     dot.setStyle(!dotActive ? { opacity: 0.8, fillOpacity: 1, radius: 3 } : matches ? { opacity: 1, fillOpacity: 1, radius: 4 } : { opacity: 0.15, fillOpacity: 0.15, radius: 3 });
   }
+}
 
+// 区名ラベル(大きく場所を占める)を先に確定させてから路線名ラベルがそれを避けるようにする
+function refreshMapOverlays() {
+  updateWardLabelPositions();
+  updateMapHighlight();
   updateLineLabelPositions();
 }
 
@@ -350,7 +413,7 @@ function setupFilters() {
     wardSelect.appendChild(opt);
   });
 
-  const onFilterChange = () => { applyFilters(); updateMapHighlight(); nextQuestion(); };
+  const onFilterChange = () => { applyFilters(); refreshMapOverlays(); nextQuestion(); };
   operatorSelect.addEventListener("change", onFilterChange);
   lineSelect.addEventListener("change", onFilterChange);
   wardSelect.addEventListener("change", onFilterChange);

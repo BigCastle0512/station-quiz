@@ -237,7 +237,7 @@ def clean_line_name(raw_name: str) -> str | None:
     name = re.sub(r"[（(].*?[）)]", "", name).strip()
     name = re.sub(r"(上り|下り|内回り|外回り)$", "", name).strip()
     name = re.sub(
-        r"\s*(各駅停車|快速|通勤快速|急行|通勤急行|準急|特急|区間急行|特別快速|中央特快|青梅特快|特別区間急行)$",
+        r"\s*(各駅停車|快速|通勤快速|急行|通勤急行|準急|特急|快特|区間急行|特別快速|中央特快|青梅特快|特別区間急行)$",
         "", name,
     ).strip()
     if not name or any(a in name for a in ARROW_CHARS) or "Stopping service" in name:
@@ -328,24 +328,8 @@ def build_line_geometry(route_elements: list[dict]) -> dict:
     ways_by_id = {e["id"]: e for e in route_elements if e["type"] == "way"}
     relations = [e for e in route_elements if e["type"] == "relation"]
 
-    lines: dict = {}
-    for rel in relations:
-        tags = rel.get("tags", {})
-        raw_name = tags.get("name")
-        if not raw_name:
-            continue
-        line_name = clean_line_name(raw_name)
-        if not line_name:
-            continue
-
-        entry = lines.setdefault(line_name, {"color": None, "operator": None, "segments": []})
-        if not entry["color"] and tags.get("colour"):
-            entry["color"] = tags["colour"]
-        if not entry["operator"]:
-            raw_op = tags.get("operator") or tags.get("network")
-            if raw_op:
-                entry["operator"] = normalize_operator(raw_op)
-
+    def way_segments(rel) -> list[list[list[float]]]:
+        segments = []
         for member in rel.get("members", []):
             if member["type"] != "way" or member.get("role") not in ("", None):
                 continue
@@ -362,7 +346,40 @@ def build_line_geometry(route_elements: list[dict]) -> dict:
                 BBOX[0] - 0.05 <= lat <= BBOX[2] + 0.05 and BBOX[1] - 0.05 <= lon <= BBOX[3] + 0.05
                 for lat, lon in coords
             ):
-                entry["segments"].append(coords)
+                segments.append(coords)
+        return segments
+
+    lines: dict = {}
+    unmatched: list[tuple[str, dict]] = []
+
+    for rel in relations:
+        tags = rel.get("tags", {})
+        raw_name = tags.get("name")
+        if not raw_name:
+            continue
+        line_name = clean_line_name(raw_name)
+        if not line_name:
+            unmatched.append((raw_name, rel))
+            continue
+
+        entry = lines.setdefault(line_name, {"color": None, "operator": None, "segments": []})
+        if not entry["color"] and tags.get("colour"):
+            entry["color"] = tags["colour"]
+        if not entry["operator"]:
+            raw_op = tags.get("operator") or tags.get("network")
+            if raw_op:
+                entry["operator"] = normalize_operator(raw_op)
+        entry["segments"].extend(way_segments(rel))
+
+    # 直通運転などを理由に路線名として弾かれたリレーションでも、実在の路線区間を含んでいることが多い
+    # (例: 「東京メトロ日比谷線 - 東武スカイツリーライン直通運転」)。名前を " - " で分割し、
+    # 既知の路線名に一致する部分があれば、その路線の線路データとして取り込む。
+    for raw_name, rel in unmatched:
+        for part in raw_name.split(" - "):
+            candidate = clean_line_name(part)
+            if candidate and candidate in lines:
+                lines[candidate]["segments"].extend(way_segments(rel))
+                break
 
     for i, (name, entry) in enumerate(sorted(lines.items())):
         if not entry["color"]:
