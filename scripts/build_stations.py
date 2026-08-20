@@ -363,6 +363,63 @@ def build_line_membership(stations: list[dict], route_elements: list[dict]) -> N
         st["adjacent"] = {line: sorted(names) for line, names in st["adjacent"].items()}
 
 
+# 種別名にこれらの語を含むリレーションは急行・快速などの優等列車の停車駅を表す。
+# 「各駅停車」「普通」など各停系は含めない(=優等種別ではない扱い)。
+EXPRESS_KEYWORDS = (
+    "快速", "急行", "準急", "特急", "快特", "ライナー", "エクスプレス", "特快",
+)
+LOCAL_ONLY_KEYWORDS = ("各駅停車", "各停", "普通")
+
+
+def mark_express_stops(stations: list[dict], route_elements: list[dict]) -> None:
+    """優等列車(急行・快速など)が停車する駅に is_express フラグを立てる。"""
+
+    def nearest_station(lat, lon, max_km=0.25):
+        best, best_d = None, max_km
+        for st in stations:
+            d = haversine_km(lat, lon, st["lat"], st["lon"])
+            if d < best_d:
+                best, best_d = st, d
+        return best
+
+    nodes_by_id = {e["id"]: e for e in route_elements if e["type"] == "node"}
+    ways_by_id = {e["id"]: e for e in route_elements if e["type"] == "way"}
+    relations = [e for e in route_elements if e["type"] == "relation"]
+
+    def member_latlon(member):
+        if member["type"] == "node":
+            node = nodes_by_id.get(member["ref"])
+            return (node["lat"], node["lon"]) if node and "lat" in node else None
+        if member["type"] == "way":
+            way = ways_by_id.get(member["ref"])
+            if not way:
+                return None
+            coords = [(n["lat"], n["lon"]) for nid in way.get("nodes", []) if (n := nodes_by_id.get(nid)) and "lat" in n]
+            if not coords:
+                return None
+            return (sum(c[0] for c in coords) / len(coords), sum(c[1] for c in coords) / len(coords))
+        return None
+
+    for st in stations:
+        st["is_express"] = False
+
+    for rel in relations:
+        raw_name = rel.get("tags", {}).get("name", "")
+        if any(kw in raw_name for kw in LOCAL_ONLY_KEYWORDS):
+            continue
+        if not any(kw in raw_name for kw in EXPRESS_KEYWORDS):
+            continue
+        for member in rel.get("members", []):
+            if member.get("role") not in ("stop", "stop_entry_only", "platform"):
+                continue
+            latlon = member_latlon(member)
+            if not latlon:
+                continue
+            matched = nearest_station(*latlon)
+            if matched:
+                matched["is_express"] = True
+
+
 # 薄い背景地図上でも視認できるよう、明るすぎる・淡すぎる色は避けた濃色パレット
 FALLBACK_COLORS = [
     "#c0392b", "#1f618d", "#1e8449", "#8e44ad", "#d35400", "#117864", "#a1045a",
@@ -466,6 +523,10 @@ def main():
         for line in MANUAL_LINE_ADDITIONS.get(st["name"], []):
             if line not in st["lines"]:
                 st["lines"].append(line)
+
+    print("5.5. 優等列車の停車駅を判定中...")
+    mark_express_stops(stations, raw_routes)
+    print(f"   優等停車駅: {sum(1 for s in stations if s['is_express'])} / {len(stations)}")
 
     print("6. 主要ターミナル駅までの距離を計算中...")
     for st in stations:

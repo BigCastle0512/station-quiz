@@ -357,6 +357,7 @@ function updateMapHighlight() {
 
   const dotActive = Boolean(line || operator || ward);
   const dotZoomOk = map.getZoom() >= STATION_DOT_MIN_ZOOM;
+  const dotMode = document.getElementById("dot-mode-select").value;
   for (const st of stations) {
     const dot = stationDots[st.id];
     if (!dot) continue;
@@ -368,7 +369,14 @@ function updateMapHighlight() {
       (!line || st.lines.includes(line)) &&
       (!operator || stationLinesForOperator(st, operator)) &&
       (!ward || st.ward === ward);
-    dot.setStyle(!dotActive ? { opacity: 0.8, fillOpacity: 1, radius: 3 } : matches ? { opacity: 1, fillOpacity: 1, radius: 4 } : { opacity: 0.15, fillOpacity: 0.15, radius: 3 });
+    const baseRadius = dotMode === "express" ? (st.is_express ? 5 : 1.8) : 3;
+    dot.setStyle(
+      !dotActive
+        ? { opacity: 0.8, fillOpacity: 1, radius: baseRadius }
+        : matches
+        ? { opacity: 1, fillOpacity: 1, radius: baseRadius + 1 }
+        : { opacity: 0.15, fillOpacity: 0.15, radius: baseRadius }
+    );
   }
 }
 
@@ -419,6 +427,8 @@ function setupFilters() {
   lineSelect.addEventListener("change", onFilterChange);
   wardSelect.addEventListener("change", onFilterChange);
   document.getElementById("weak-only-checkbox").addEventListener("change", onFilterChange);
+  // 駅の点の表示モード切替は出題に影響しないため、問題を変えずに見た目だけ更新する
+  document.getElementById("dot-mode-select").addEventListener("change", updateMapHighlight);
 }
 
 function stationLinesForOperator(st, operator) {
