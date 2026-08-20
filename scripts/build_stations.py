@@ -120,6 +120,8 @@ def fetch_raw_routes() -> list[dict]:
   relation["route"="subway"]({BBOX_STR});
   relation["route"="train"]({BBOX_STR});
   relation["route"="light_rail"]({BBOX_STR});
+  relation["route"="tram"]({BBOX_STR});
+  relation["route"="monorail"]({BBOX_STR});
 );
 out body;
 >;
@@ -225,21 +227,33 @@ LINE_NAME_WHITELIST = {"ゆりかもめ"}
 # OSM の name タグに既知の誤り・表記ゆれがあるものへの手動補正
 LINE_NAME_OVERRIDES = {"南新宿ライン": "湘南新宿ライン"}
 
-# 複数の事業者ノードが至近距離に分かれていて自動マッチングが漏れる巨大駅への補正
+# 複数の事業者ノードが至近距離に分かれていて自動マッチングが漏れる巨大駅、
+# またはOSMのリレーションにstopとして含まれていない駅への補正
 MANUAL_LINE_ADDITIONS = {
     "新宿": ["JR山手線", "東京メトロ丸ノ内線", "都営新宿線", "都営大江戸線", "西武鉄道西武新宿線"],
+    "千歳船橋": ["小田急電鉄小田原線"],
+    "喜多見": ["小田急電鉄小田原線"],
+    "祖師ヶ谷大蔵": ["小田急電鉄小田原線"],
 }
 
 
 def clean_line_name(raw_name: str) -> str | None:
     """方向別・直通運転の合成名・臨時列車名など、路線名として使いにくいものを正規化・除外する。"""
-    name = raw_name.split(" : ")[0].split("：")[0]
+    name = re.sub(r"^列車\s*", "", raw_name)
+    # "線: 横浜 => 渋谷" のようにコロンの前にスペースが無い表記もあるため、前後の空白を許容して分割する
+    name = re.split(r"\s*[:：]\s*", name, maxsplit=1)[0]
     name = re.sub(r"[（(].*?[）)]", "", name).strip()
     name = re.sub(r"(上り|下り|内回り|外回り)$", "", name).strip()
     name = re.sub(
-        r"\s*(各駅停車|快速|通勤快速|急行|通勤急行|準急|特急|快特|区間急行|特別快速|中央特快|青梅特快|特別区間急行)$",
+        r"\s*(各駅停車|快速|通勤快速|急行|通勤急行|準急|特急|快特|区間急行|特別快速|中央特快|青梅特快|特別区間急行|普通|各停)$",
         "", name,
     ).strip()
+    # "路線名 種別" のように、路線名らしき接尾辞の直後にスペース区切りで種別語が
+    # 続くパターンを汎用的に切り落とす(個別の種別名を列挙しきれないため)
+    if " " in name:
+        prefix = name.rsplit(" ", 1)[0]
+        if prefix.endswith(LINE_SUFFIXES):
+            name = prefix
     if not name or any(a in name for a in ARROW_CHARS) or "Stopping service" in name:
         return None
     if " - " in name or "•" in name or "直通運転" in name:
@@ -249,6 +263,18 @@ def clean_line_name(raw_name: str) -> str | None:
     if name not in LINE_NAME_WHITELIST and not name.endswith(LINE_SUFFIXES):
         return None  # 臨時・named limited express など「線」を名乗らない列車名を除外
     return LINE_NAME_OVERRIDES.get(name, name)
+
+
+def candidate_line_name_parts(raw_name: str) -> list[str]:
+    """直通運転名(例: 「東武東上線 - 副都心線 - 東急東横線・みなとみらい線 直通運転」)から
+    既知の路線名を復元するための候補文字列を列挙する。"""
+    parts = []
+    for chunk in raw_name.split(" - "):
+        for sub in chunk.split("・"):
+            cleaned = clean_line_name(sub)
+            if cleaned:
+                parts.append(cleaned)
+    return parts
 
 
 def build_line_membership(stations: list[dict], route_elements: list[dict]) -> None:
@@ -282,13 +308,7 @@ def build_line_membership(stations: list[dict], route_elements: list[dict]) -> N
         st["lines"] = set()
         st["adjacent"] = {}
 
-    for rel in relations:
-        raw_name = rel.get("tags", {}).get("name")
-        if not raw_name:
-            continue
-        line_name = clean_line_name(raw_name)
-        if not line_name:
-            continue
+    def tag_stops(rel, line_name):
         ordered_stations = []
         for member in rel.get("members", []):
             if member.get("role") not in ("stop", "stop_entry_only", "platform"):
@@ -309,6 +329,34 @@ def build_line_membership(stations: list[dict], route_elements: list[dict]) -> N
                 neighbors.add(ordered_stations[i - 1]["name"])
             if i < len(ordered_stations) - 1:
                 neighbors.add(ordered_stations[i + 1]["name"])
+
+    known_line_names = set()
+    unmatched = []
+    for rel in relations:
+        raw_name = rel.get("tags", {}).get("name")
+        if not raw_name:
+            continue
+        line_name = clean_line_name(raw_name)
+        if line_name:
+            known_line_names.add(line_name)
+        else:
+            unmatched.append((raw_name, rel))
+
+    for rel in relations:
+        raw_name = rel.get("tags", {}).get("name")
+        if not raw_name:
+            continue
+        line_name = clean_line_name(raw_name)
+        if line_name:
+            tag_stops(rel, line_name)
+
+    # 直通運転などで名前が弾かれたリレーションでも、分割した一部が既知の路線名と
+    # 一致すればその路線の駅として扱う(build_line_geometryと同じ救済ロジック)。
+    for raw_name, rel in unmatched:
+        for candidate in candidate_line_name_parts(raw_name):
+            if candidate in known_line_names:
+                tag_stops(rel, candidate)
+                break
 
     for st in stations:
         st["lines"] = sorted(st["lines"])
@@ -372,12 +420,11 @@ def build_line_geometry(route_elements: list[dict]) -> dict:
         entry["segments"].extend(way_segments(rel))
 
     # 直通運転などを理由に路線名として弾かれたリレーションでも、実在の路線区間を含んでいることが多い
-    # (例: 「東京メトロ日比谷線 - 東武スカイツリーライン直通運転」)。名前を " - " で分割し、
-    # 既知の路線名に一致する部分があれば、その路線の線路データとして取り込む。
+    # (例: 「東京メトロ日比谷線 - 東武スカイツリーライン直通運転」)。分割した一部が
+    # 既知の路線名に一致すれば、その路線の線路データとして取り込む。
     for raw_name, rel in unmatched:
-        for part in raw_name.split(" - "):
-            candidate = clean_line_name(part)
-            if candidate and candidate in lines:
+        for candidate in candidate_line_name_parts(raw_name):
+            if candidate in lines:
                 lines[candidate]["segments"].extend(way_segments(rel))
                 break
 

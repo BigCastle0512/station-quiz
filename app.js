@@ -239,16 +239,11 @@ function updateWardLabelPositions() {
 
 function renderLines() {
   for (const [name, entry] of Object.entries(lineData)) {
-    const popupHtml = `<b>${name}</b><br>${entry.operator || ""}`;
     const casings = [];
     const polylines = entry.segments.map((seg) => {
       // 縁取り: 黄色など淡い色の路線が薄い背景地図に埋もれて見えなくなるのを防ぐ(太すぎないよう最小限に)
       casings.push(L.polyline(seg, { color: "#222", weight: 3.5, opacity: 0.2, interactive: false }).addTo(lineLayer));
-      // タップ判定用に太い透明な線を下に重ね、見た目の細い線はそのまま保つ(スマホでの誤タップ対策)
-      L.polyline(seg, { color: "#000", weight: 16, opacity: 0, interactive: true })
-        .bindPopup(popupHtml)
-        .addTo(lineLayer);
-      return L.polyline(seg, { color: entry.color, weight: 2, opacity: 0.85 }).bindPopup(popupHtml).addTo(lineLayer);
+      return L.polyline(seg, { color: entry.color, weight: 2, opacity: 0.85, interactive: false }).addTo(lineLayer);
     });
     linePolylines[name] = polylines;
     lineCasings[name] = casings;
@@ -327,7 +322,7 @@ function renderStationDots() {
       fillColor: "#fff",
       fillOpacity: 1,
       opacity: 0.8,
-    }).bindPopup(`<b>${st.name}</b><br>${st.ward || ""}`).addTo(stationDotsLayer);
+    }).bindPopup(`<b>${st.name}駅</b><br>${st.ward || ""}`).addTo(stationDotsLayer);
     stationDots[st.id] = dot;
   }
 }
@@ -546,12 +541,11 @@ function revealChoiceLocations(correctStation, chosenStation) {
 }
 
 function setOverlaysInteractive(enabled) {
-  for (const layerGroup of [lineLayer, stationDotsLayer]) {
-    layerGroup.eachLayer((layer) => {
-      const el = layer.getElement && layer.getElement();
-      if (el) el.style.pointerEvents = enabled ? "" : "none";
-    });
-  }
+  // 路線はクリック不可(ポップアップ廃止)になったため、駅の点だけ制御すればよい
+  stationDotsLayer.eachLayer((layer) => {
+    const el = layer.getElement && layer.getElement();
+    if (el) el.style.pointerEvents = enabled ? "" : "none";
+  });
 }
 
 function startNameToPin() {
