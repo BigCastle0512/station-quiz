@@ -8,6 +8,7 @@ let filteredStations = [];
 let progress = loadProgress();
 let mode = "pin-to-name";
 let current = null; // 現在の問題に関する状態
+let activeMapClickHandler = null; // 「駅名→地図」で登録中のクリックハンドラ(前の問題の未回答分を確実に解除するため)
 let map, markerLayer, lineLayer, wardLayer, stationDotsLayer;
 let linePolylines = {}; // 路線名 -> Leaflet Polyline[]
 let lineCasings = {}; // 路線名 -> Leaflet Polyline[](縁取り)
@@ -481,6 +482,12 @@ function nextQuestion() {
   document.getElementById("feedback-area").className = "";
   markerLayer.clearLayers();
   setOverlaysInteractive(true); // モード切替などで前の問題のクリック無効化が残らないようにする
+  if (activeMapClickHandler) {
+    // フィルタ変更などで前の「駅名→地図」問題が未回答のまま次に進んだ場合、
+    // 古いクリックハンドラが残って誤って正解を上書きしてしまうのを防ぐ
+    map.off("click", activeMapClickHandler);
+    activeMapClickHandler = null;
+  }
 
   if (filteredStations.length === 0) {
     document.getElementById("question-area").textContent = "この条件に一致する駅がありません。フィルタを変更してください。";
@@ -569,6 +576,7 @@ function startNameToPin() {
     if (current.answered) return;
     current.answered = true;
     map.off("click", clickHandler);
+    activeMapClickHandler = null;
     setOverlaysInteractive(true);
     const dist = haversineKm(e.latlng.lat, e.latlng.lng, st.lat, st.lon);
     const correct = dist <= CORRECT_DISTANCE_KM;
@@ -602,6 +610,7 @@ function startNameToPin() {
         : `不正解。実際の位置までの距離: 約${dist.toFixed(2)}km(${CORRECT_DISTANCE_KM}km以内なら正解でした。青い円が正解の範囲です)`
     );
   };
+  activeMapClickHandler = clickHandler;
   map.on("click", clickHandler);
 }
 
