@@ -3,26 +3,37 @@ const CORRECT_DISTANCE_KM = 0.6; // 駅名→地図クリックで正解とみ�
 
 let stations = [];
 let lineData = {}; // 路線名 -> {color, operator, segments}
+let wardData = {}; // 区名 -> [[[lat,lon],...], ...] (穴のあるポリゴンも考慮し複数リング)
 let filteredStations = [];
 let progress = loadProgress();
 let mode = "pin-to-name";
 let current = null; // 現在の問題に関する状態
-let map, markerLayer, lineLayer;
+let map, markerLayer, lineLayer, wardLayer, stationDotsLayer;
 let linePolylines = {}; // 路線名 -> Leaflet Polyline[]
+let stationDots = {}; // 駅id -> Leaflet CircleMarker
 
 async function init() {
   const [stRes, lineRes] = await Promise.all([fetch("data/stations.json"), fetch("data/lines.json")]);
   stations = await stRes.json();
   lineData = await lineRes.json();
+  try {
+    const wardRes = await fetch("data/wards.json");
+    if (wardRes.ok) wardData = await wardRes.json();
+  } catch {
+    wardData = {};
+  }
 
   setupMap();
+  renderWardBoundaries();
   renderLines();
+  renderStationDots();
   setupFilters();
   setupModeButtons();
   document.getElementById("next-btn").addEventListener("click", nextQuestion);
   document.getElementById("reset-score-btn").addEventListener("click", resetScore);
 
   applyFilters();
+  updateMapHighlight();
   updateScoreText();
   nextQuestion();
 }
@@ -33,32 +44,74 @@ function setupMap() {
     attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
     maxZoom: 19,
   }).addTo(map);
+  wardLayer = L.layerGroup().addTo(map);
   lineLayer = L.layerGroup().addTo(map);
+  stationDotsLayer = L.layerGroup().addTo(map);
   markerLayer = L.layerGroup().addTo(map);
+}
+
+function renderWardBoundaries() {
+  for (const [name, rings] of Object.entries(wardData)) {
+    L.polygon(rings, {
+      color: "#8a8a99",
+      weight: 1.5,
+      opacity: 0.8,
+      fill: false,
+      dashArray: "4 3",
+      interactive: false,
+    }).addTo(wardLayer);
+  }
 }
 
 function renderLines() {
   for (const [name, entry] of Object.entries(lineData)) {
+    const popupHtml = `<b>${name}</b><br>${entry.operator || ""}`;
     const polylines = entry.segments.map((seg) =>
-      L.polyline(seg, { color: entry.color, weight: 3, opacity: 0.65 }).addTo(lineLayer)
+      L.polyline(seg, { color: entry.color, weight: 3, opacity: 0.65 }).bindPopup(popupHtml).addTo(lineLayer)
     );
     linePolylines[name] = polylines;
   }
 }
 
-function updateLineHighlight() {
+function renderStationDots() {
+  for (const st of stations) {
+    const dot = L.circleMarker([st.lat, st.lon], {
+      radius: 3,
+      color: "#333",
+      weight: 1,
+      fillColor: "#fff",
+      fillOpacity: 1,
+      opacity: 0.8,
+    }).bindPopup(`<b>${st.name}</b><br>${st.ward || ""}`).addTo(stationDotsLayer);
+    stationDots[st.id] = dot;
+  }
+}
+
+function updateMapHighlight() {
   const line = document.getElementById("line-filter").value;
   const operator = document.getElementById("operator-filter").value;
-  const active = Boolean(line || operator);
+  const ward = document.getElementById("ward-filter").value;
+  const lineActive = Boolean(line || operator);
 
   for (const [name, polylines] of Object.entries(linePolylines)) {
     const matches = (!line || name === line) && (!operator || lineData[name].operator === operator);
-    const style = !active
+    const style = !lineActive
       ? { opacity: 0.65, weight: 3 }
       : matches
       ? { opacity: 0.95, weight: 5 }
       : { opacity: 0.1, weight: 2 };
     polylines.forEach((pl) => pl.setStyle(style));
+  }
+
+  const dotActive = Boolean(line || operator || ward);
+  for (const st of stations) {
+    const dot = stationDots[st.id];
+    if (!dot) continue;
+    const matches =
+      (!line || st.lines.includes(line)) &&
+      (!operator || stationLinesForOperator(st, operator)) &&
+      (!ward || st.ward === ward);
+    dot.setStyle(!dotActive ? { opacity: 0.8, fillOpacity: 1, radius: 3 } : matches ? { opacity: 1, fillOpacity: 1, radius: 4 } : { opacity: 0.15, fillOpacity: 0.15, radius: 3 });
   }
 }
 
@@ -97,7 +150,7 @@ function setupFilters() {
     wardSelect.appendChild(opt);
   });
 
-  const onFilterChange = () => { applyFilters(); updateLineHighlight(); nextQuestion(); };
+  const onFilterChange = () => { applyFilters(); updateMapHighlight(); nextQuestion(); };
   operatorSelect.addEventListener("change", onFilterChange);
   lineSelect.addEventListener("change", onFilterChange);
   wardSelect.addEventListener("change", onFilterChange);
@@ -178,13 +231,13 @@ function nextQuestion() {
 
 function startPinToName() {
   const st = pickRandom(filteredStations);
-  current = { type: "pin-to-name", station: st };
+  const choices = pickChoices(st, 4);
+  current = { type: "pin-to-name", station: st, choices };
 
   map.setView([st.lat, st.lon], 15);
   L.circleMarker([st.lat, st.lon], { radius: 9, className: "station-marker" }).addTo(markerLayer);
 
   document.getElementById("question-area").innerHTML = "地図のピンの駅名は？";
-  const choices = pickChoices(st, 4);
   const answerArea = document.getElementById("answer-area");
   answerArea.innerHTML = "";
   choices.forEach((choice) => {
@@ -194,6 +247,30 @@ function startPinToName() {
     btn.addEventListener("click", () => handleChoiceAnswer(btn, choice, st));
     answerArea.appendChild(btn);
   });
+}
+
+function revealChoiceLocations(correctStation, chosenStation) {
+  const bounds = [];
+  for (const choice of current.choices) {
+    bounds.push([choice.lat, choice.lon]);
+    if (choice === correctStation) {
+      L.circleMarker([choice.lat, choice.lon], { radius: 9, className: "station-marker" })
+        .bindTooltip(choice.name, { permanent: true, direction: "top", className: "reveal-label correct" })
+        .addTo(markerLayer);
+      continue;
+    }
+    const isWrongPick = choice === chosenStation;
+    L.circleMarker([choice.lat, choice.lon], {
+      radius: 7,
+      color: isWrongPick ? "#d9463f" : "#999",
+      fillColor: isWrongPick ? "#d9463f" : "#999",
+      fillOpacity: 0.8,
+      weight: 2,
+    })
+      .bindTooltip(choice.name, { permanent: true, direction: "top", className: isWrongPick ? "reveal-label wrong" : "reveal-label" })
+      .addTo(markerLayer);
+  }
+  map.fitBounds(bounds, { padding: [40, 40], maxZoom: 15 });
 }
 
 function startNameToPin() {
@@ -308,6 +385,7 @@ function handleChoiceAnswer(btn, choice, correctStation) {
   markChoiceButtons(correct, choice.name, correctStation.name);
   recordResult(correctStation, correct);
   showFeedback(correct, correct ? "正解！" : `不正解。正解は「${correctStation.name}」`);
+  revealChoiceLocations(correctStation, choice);
 }
 
 function handleTextChoiceAnswer(btn, chosenValue, correctValue, extraNote) {
