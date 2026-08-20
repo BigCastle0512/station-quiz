@@ -32,16 +32,17 @@ OVERPASS_ENDPOINTS = [
 
 # Wikidata (P402: OpenStreetMap relation ID) から取得した23区の行政境界リレーションID。
 # 一部の区(荒川区・練馬区・江戸川区)はWikidataに登録が無く、Overpassの名前検索も
-# 不安定だったため未確定。駅座標からの凸包で代用する。
+# 残り3区(荒川区・練馬区・江戸川区)はNominatim検索で判明したID。
 WARD_RELATION_IDS = {
     "新宿区": 1758858, "港区": 1761717, "渋谷区": 1759477, "中央区": 1758897,
     "文京区": 1758878, "足立区": 1760124, "千代田区": 1761742, "江東区": 3554015,
     "大田区": 1758947, "世田谷区": 1759474, "葛飾区": 1761718, "杉並区": 1543055,
     "板橋区": 1760078, "台東区": 1758888, "品川区": 3554304, "目黒区": 1758936,
     "中野区": 1543056, "北区": 1760038, "墨田区": 1758891, "豊島区": 1759506,
+    "荒川区": 1760040, "練馬区": 1760119, "江戸川区": 1761743,
 }
 
-ALL_WARDS = WARD_RELATION_IDS.keys() | {"荒川区", "練馬区", "江戸川区"}
+ALL_WARDS = WARD_RELATION_IDS.keys()
 
 
 def fetch_ward_geometry(relation_id: int) -> dict | None:
@@ -76,6 +77,41 @@ def rings_from_relation_json(data: dict) -> list[list[list[float]]]:
         ring = [[pt["lat"], pt["lon"]] for pt in member["geometry"]]
         if len(ring) >= 2:
             rings.append(ring)
+    return stitch_rings(rings)
+
+
+def stitch_rings(arcs: list[list[list[float]]]) -> list[list[list[float]]]:
+    """OSMのマルチポリゴンは境界を複数の断片(弧)に分けて持つため、
+    端点が一致する断片同士をつなげて閉じた1つのリングに復元する。"""
+
+    def key(pt):
+        return (round(pt[0], 7), round(pt[1], 7))
+
+    remaining = [list(arc) for arc in arcs if len(arc) >= 2]
+    rings = []
+
+    while remaining:
+        current = remaining.pop(0)
+        changed = True
+        while changed and key(current[0]) != key(current[-1]):
+            changed = False
+            start_key, end_key = key(current[0]), key(current[-1])
+            for i, arc in enumerate(remaining):
+                a_start, a_end = key(arc[0]), key(arc[-1])
+                if a_start == end_key:
+                    current = current + arc[1:]
+                elif a_end == end_key:
+                    current = current + list(reversed(arc))[1:]
+                elif a_end == start_key:
+                    current = arc[:-1] + current
+                elif a_start == start_key:
+                    current = list(reversed(arc))[:-1] + current
+                else:
+                    continue
+                remaining.pop(i)
+                changed = True
+                break
+        rings.append(current)
     return rings
 
 

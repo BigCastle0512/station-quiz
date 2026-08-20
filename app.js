@@ -13,6 +13,7 @@ let linePolylines = {}; // 路線名 -> Leaflet Polyline[]
 let lineLabels = {}; // 路線名 -> Leaflet Marker(常時ラベル表示用)
 let stationDots = {}; // 駅id -> Leaflet CircleMarker
 const LINE_LABEL_MIN_ZOOM = 13; // これより引いた(数字が小さい)ズームではラベルを隠して文字の重なりを防ぐ
+const STATION_DOT_MIN_ZOOM = 13; // これより引いたズームでは駅の点を隠し、広域では路線の形状を見やすくする
 
 async function init() {
   const [stRes, lineRes] = await Promise.all([fetch("data/stations.json"), fetch("data/lines.json")]);
@@ -36,6 +37,7 @@ async function init() {
 
   applyFilters();
   updateMapHighlight();
+  updateWardLabelPositions();
   updateScoreText();
   nextQuestion();
 }
@@ -46,23 +48,98 @@ function setupMap() {
     attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
     maxZoom: 19,
   }).addTo(map);
-  wardLayer = L.layerGroup().addTo(map);
   lineLayer = L.layerGroup().addTo(map);
+  wardLayer = L.layerGroup().addTo(map);
   stationDotsLayer = L.layerGroup().addTo(map);
   markerLayer = L.layerGroup().addTo(map);
-  map.on("zoomend", updateLineLabelVisibility);
+  map.on("moveend", () => {
+    updateMapHighlight();
+    updateWardLabelPositions();
+  });
 }
 
 function renderWardBoundaries() {
+  // build_wards.py側で断片(弧)を閉じた1つのリングにつなげ済み
   for (const [name, rings] of Object.entries(wardData)) {
     L.polygon(rings, {
-      color: "#8a8a99",
-      weight: 1.5,
-      opacity: 0.8,
+      color: "#7a5c4a",
+      weight: 1.6,
+      opacity: 0.55,
       fill: false,
-      dashArray: "4 3",
+      dashArray: "7 5",
       interactive: false,
     }).addTo(wardLayer);
+  }
+}
+
+// レイキャスティング法による点内外判定 (ring は [lat,lon] の配列、閉じていなくても可)
+function pointInRing(lat, lon, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [yi, xi] = ring[i];
+    const [yj, xj] = ring[j];
+    const intersect = yi > lat !== yj > lat && lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function findWardAt(lat, lon) {
+  for (const [name, rings] of Object.entries(wardData)) {
+    if (rings.some((ring) => pointInRing(lat, lon, ring))) return name;
+  }
+  return null;
+}
+
+let wardLabels = {}; // 区名 -> Leaflet Marker(常時ラベル表示用)
+const WARD_LABEL_MIN_ZOOM = 10;
+
+function updateWardLabelPositions() {
+  for (const label of Object.values(wardLabels)) map.removeLayer(label);
+  wardLabels = {};
+
+  if (map.getZoom() < WARD_LABEL_MIN_ZOOM) return;
+
+  const bounds = map.getBounds();
+  const center = map.getCenter();
+  const MIN_LABEL_SPACING_PX = 90;
+  const candidates = [];
+
+  for (const [name, rings] of Object.entries(wardData)) {
+    // 画面中心がその区の内側にあれば中心付近に、そうでなければ画面内に見えている境界上の点に表示する
+    let point = null;
+    if (rings.some((ring) => pointInRing(center.lat, center.lng, ring))) {
+      point = [center.lat, center.lng];
+    } else {
+      let bestDist = Infinity;
+      for (const ring of rings) {
+        for (const pt of ring) {
+          if (!bounds.contains(pt)) continue;
+          const d = center.distanceTo(pt);
+          if (d < bestDist) {
+            bestDist = d;
+            point = pt;
+          }
+        }
+      }
+    }
+    if (point) candidates.push({ name, point });
+  }
+
+  const placedScreenPoints = [];
+  for (const { name, point } of candidates) {
+    const screenPt = map.latLngToContainerPoint(point);
+    if (placedScreenPoints.some((p) => screenPt.distanceTo(p) < MIN_LABEL_SPACING_PX)) continue;
+    placedScreenPoints.push(screenPt);
+
+    const label = L.marker(point, {
+      icon: L.divIcon({ className: "ward-label-anchor", iconSize: [0, 0] }),
+      interactive: false,
+      keyboard: false,
+    })
+      .bindTooltip(name, { permanent: true, direction: "center", className: "ward-label" })
+      .addTo(wardLayer);
+    wardLabels[name] = label;
   }
 }
 
@@ -70,17 +147,66 @@ function renderLines() {
   for (const [name, entry] of Object.entries(lineData)) {
     const popupHtml = `<b>${name}</b><br>${entry.operator || ""}`;
     const polylines = entry.segments.map((seg) => {
+      // 縁取り: 黄色など淡い色の路線が薄い背景地図に埋もれて見えなくなるのを防ぐ
+      L.polyline(seg, { color: "#222", weight: 5, opacity: 0.25, interactive: false }).addTo(lineLayer);
       // タップ判定用に太い透明な線を下に重ね、見た目の細い線はそのまま保つ(スマホでの誤タップ対策)
       L.polyline(seg, { color: "#000", weight: 16, opacity: 0, interactive: true })
         .bindPopup(popupHtml)
         .addTo(lineLayer);
-      return L.polyline(seg, { color: entry.color, weight: 3, opacity: 0.65 }).bindPopup(popupHtml).addTo(lineLayer);
+      return L.polyline(seg, { color: entry.color, weight: 3, opacity: 0.85 }).bindPopup(popupHtml).addTo(lineLayer);
     });
     linePolylines[name] = polylines;
+  }
+}
 
-    const longest = entry.segments.reduce((a, b) => (b.length > a.length ? b : a), entry.segments[0]);
-    const midpoint = longest[Math.floor(longest.length / 2)];
-    const label = L.marker(midpoint, {
+function updateLineLabelPositions() {
+  const line = document.getElementById("line-filter").value;
+  const operator = document.getElementById("operator-filter").value;
+  const filterActive = Boolean(line || operator);
+  const zoomOk = map.getZoom() >= LINE_LABEL_MIN_ZOOM;
+
+  for (const [name, label] of Object.entries(lineLabels)) {
+    map.removeLayer(label);
+  }
+  lineLabels = {};
+
+  if (!zoomOk) return;
+
+  const bounds = map.getBounds();
+  const center = map.getCenter();
+  const MIN_LABEL_SPACING_PX = 60; // ラベル同士の重なりを避けるための最小画面距離
+
+  const candidates = [];
+  for (const [name, entry] of Object.entries(lineData)) {
+    const matches = (!line || name === line) && (!operator || entry.operator === operator);
+    if (filterActive && !matches) continue;
+
+    let best = null;
+    let bestDist = Infinity;
+    for (const seg of entry.segments) {
+      for (const pt of seg) {
+        if (!bounds.contains(pt)) continue;
+        const d = center.distanceTo(pt);
+        if (d < bestDist) {
+          bestDist = d;
+          best = pt;
+        }
+      }
+    }
+    if (best) candidates.push({ name, entry, point: best, dist: bestDist });
+  }
+
+  // 画面中心に近い(=より目立つ)路線を優先して配置し、既存ラベルと近すぎる候補はスキップする
+  candidates.sort((a, b) => a.dist - b.dist);
+  const placedScreenPoints = [];
+
+  for (const { name, entry, point } of candidates) {
+    const screenPt = map.latLngToContainerPoint(point);
+    const tooClose = placedScreenPoints.some((p) => screenPt.distanceTo(p) < MIN_LABEL_SPACING_PX);
+    if (tooClose) continue;
+    placedScreenPoints.push(screenPt);
+
+    const label = L.marker(point, {
       icon: L.divIcon({ className: "line-label-anchor", iconSize: [0, 0] }),
       interactive: false,
       keyboard: false,
@@ -92,21 +218,6 @@ function renderLines() {
       })
       .addTo(lineLayer);
     lineLabels[name] = label;
-  }
-}
-
-function updateLineLabelVisibility() {
-  const line = document.getElementById("line-filter").value;
-  const operator = document.getElementById("operator-filter").value;
-  const filterActive = Boolean(line || operator);
-  const zoomOk = map.getZoom() >= LINE_LABEL_MIN_ZOOM;
-
-  for (const [name, label] of Object.entries(lineLabels)) {
-    const matches = (!line || name === line) && (!operator || lineData[name].operator === operator);
-    const visible = zoomOk && (!filterActive || matches);
-    const tooltip = label.getTooltip();
-    const el = tooltip && tooltip.getElement();
-    if (el) el.style.display = visible ? "" : "none";
   }
 }
 
@@ -141,9 +252,14 @@ function updateMapHighlight() {
   }
 
   const dotActive = Boolean(line || operator || ward);
+  const dotZoomOk = map.getZoom() >= STATION_DOT_MIN_ZOOM;
   for (const st of stations) {
     const dot = stationDots[st.id];
     if (!dot) continue;
+    if (!dotZoomOk) {
+      dot.setStyle({ opacity: 0, fillOpacity: 0 });
+      continue;
+    }
     const matches =
       (!line || st.lines.includes(line)) &&
       (!operator || stationLinesForOperator(st, operator)) &&
@@ -151,7 +267,7 @@ function updateMapHighlight() {
     dot.setStyle(!dotActive ? { opacity: 0.8, fillOpacity: 1, radius: 3 } : matches ? { opacity: 1, fillOpacity: 1, radius: 4 } : { opacity: 0.15, fillOpacity: 0.15, radius: 3 });
   }
 
-  updateLineLabelVisibility();
+  updateLineLabelPositions();
 }
 
 function setupFilters() {
@@ -256,6 +372,7 @@ function nextQuestion() {
   document.getElementById("feedback-area").textContent = "";
   document.getElementById("feedback-area").className = "";
   markerLayer.clearLayers();
+  setOverlaysInteractive(true); // モード切替などで前の問題のクリック無効化が残らないようにする
 
   if (filteredStations.length === 0) {
     document.getElementById("question-area").textContent = "この条件に一致する駅がありません。フィルタを変更してください。";
@@ -320,26 +437,52 @@ function revealChoiceLocations(correctStation, chosenStation) {
   map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
 }
 
+function setOverlaysInteractive(enabled) {
+  for (const layerGroup of [lineLayer, stationDotsLayer]) {
+    layerGroup.eachLayer((layer) => {
+      const el = layer.getElement && layer.getElement();
+      if (el) el.style.pointerEvents = enabled ? "" : "none";
+    });
+  }
+}
+
 function startNameToPin() {
   const st = pickRandom(filteredStations);
   current = { type: "name-to-pin", station: st, answered: false };
 
   map.setView([35.68, 139.72], 11);
-  document.getElementById("question-area").innerHTML = `「<b>${st.name}</b>」駅は地図上のどこ？<div class="sub">地図をクリックして回答</div>`;
+  document.getElementById("question-area").innerHTML =
+    `「<b>${st.name}</b>」駅は地図上のどこ？<div class="sub">地図をクリックして回答(${CORRECT_DISTANCE_KM}km以内なら正解)</div>`;
   document.getElementById("answer-area").innerHTML = "";
+
+  // クイズ中は路線のポップアップが地図クリックを奪わないよう無効化する
+  setOverlaysInteractive(false);
 
   const clickHandler = (e) => {
     if (current.answered) return;
     current.answered = true;
     map.off("click", clickHandler);
+    setOverlaysInteractive(true);
     const dist = haversineKm(e.latlng.lat, e.latlng.lng, st.lat, st.lon);
     const correct = dist <= CORRECT_DISTANCE_KM;
 
+    L.circle([st.lat, st.lon], {
+      radius: CORRECT_DISTANCE_KM * 1000,
+      color: "#2563eb",
+      weight: 1,
+      fillOpacity: 0.07,
+      interactive: false,
+    }).addTo(markerLayer);
     L.circleMarker([e.latlng.lat, e.latlng.lng], { radius: 7, color: "#999" }).addTo(markerLayer);
     L.circleMarker([st.lat, st.lon], { radius: 9, className: "station-marker" }).addTo(markerLayer);
 
     recordResult(st, correct);
-    showFeedback(correct, correct ? "正解！" : `不正解。正しい位置との距離: 約${dist.toFixed(1)}km`);
+    showFeedback(
+      correct,
+      correct
+        ? `正解！(実際の位置まで約${dist.toFixed(2)}km)`
+        : `不正解。実際の位置までの距離: 約${dist.toFixed(2)}km(${CORRECT_DISTANCE_KM}km以内なら正解でした。青い円が正解の範囲です)`
+    );
   };
   map.on("click", clickHandler);
 }

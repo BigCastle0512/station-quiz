@@ -315,9 +315,10 @@ def build_line_membership(stations: list[dict], route_elements: list[dict]) -> N
         st["adjacent"] = {line: sorted(names) for line, names in st["adjacent"].items()}
 
 
+# 薄い背景地図上でも視認できるよう、明るすぎる・淡すぎる色は避けた濃色パレット
 FALLBACK_COLORS = [
-    "#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#46f0f0", "#f032e6",
-    "#bcf60c", "#fabebe", "#008080", "#e6beff", "#9a6324", "#800000", "#808000",
+    "#c0392b", "#1f618d", "#1e8449", "#8e44ad", "#d35400", "#117864", "#a1045a",
+    "#5d4037", "#283593", "#6d4c41", "#00695c", "#4527a0", "#ad1457", "#37474f",
 ]
 
 
