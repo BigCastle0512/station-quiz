@@ -66,9 +66,13 @@ function renderWardBoundaries() {
 function renderLines() {
   for (const [name, entry] of Object.entries(lineData)) {
     const popupHtml = `<b>${name}</b><br>${entry.operator || ""}`;
-    const polylines = entry.segments.map((seg) =>
-      L.polyline(seg, { color: entry.color, weight: 3, opacity: 0.65 }).bindPopup(popupHtml).addTo(lineLayer)
-    );
+    const polylines = entry.segments.map((seg) => {
+      // タップ判定用に太い透明な線を下に重ね、見た目の細い線はそのまま保つ(スマホでの誤タップ対策)
+      L.polyline(seg, { color: "#000", weight: 16, opacity: 0, interactive: true })
+        .bindPopup(popupHtml)
+        .addTo(lineLayer);
+      return L.polyline(seg, { color: entry.color, weight: 3, opacity: 0.65 }).bindPopup(popupHtml).addTo(lineLayer);
+    });
     linePolylines[name] = polylines;
   }
 }
